@@ -92,22 +92,49 @@ app.get('/health', publicLimiter, (_, res) => {
   res.json({
     ok: true,
     service: 'trust-gate',
-    version: '0.1.0',
+    version: '0.2.0',
     mock_mode: process.env.MOCK_MODE === 'true'
   })
 })
 
-app.get('/', publicLimiter, (_, res) => {
+app.get('/', publicLimiter, (req, res) => {
+  const accept = req.headers.accept ?? ''
+  if (accept.includes('text/html')) {
+    res.type('html').send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrustGate</title>
+<style>body{background:#0d0d0d;color:#ccc;font-family:'Courier New',monospace;max-width:640px;margin:40px auto;padding:0 20px;line-height:1.6}
+h1{color:#fff;letter-spacing:2px;font-size:18px;margin-bottom:4px}p.sub{color:#555;margin-top:0}
+a{color:#888}a:hover{color:#fff}table{border-collapse:collapse;width:100%;margin:20px 0}
+td{padding:6px 0;border-bottom:1px solid #1a1a1a;color:#888;vertical-align:top}td:first-child{color:#555;width:200px}
+.price{color:#fff}</style></head><body>
+<h1>TRUSTGATE</h1>
+<p class="sub">ERC-8004 + on-chain trust scoring for x402 agents</p>
+<table>
+<tr><td>GET /trust/:address</td><td>Trust score for a wallet — <span class="price">$0.01 USDC</span></td></tr>
+<tr><td>POST /gate</td><td>Allow/deny decision — <span class="price">$0.01 USDC</span></td></tr>
+<tr><td>GET /debug/:address</td><td>Raw chain data — free</td></tr>
+<tr><td>GET /stats</td><td>Aggregate analytics — free</td></tr>
+<tr><td>GET /health</td><td>Health check — free</td></tr>
+</table>
+<p>Base mainnet &middot; x402 protocol &middot; $0.01 USDC per check</p>
+<p><a href="https://github.com/oceanrun/trust-gate">github.com/oceanrun/trust-gate</a></p>
+</body></html>`)
+    return
+  }
+
   res.json({
     name: 'TrustGate',
     description: 'ERC-8004 trust scoring for AI agents. Pay $0.01 USDC per check.',
     endpoints: {
       'GET /trust/:address': 'Trust score for a wallet address — $0.01 USDC',
       'POST /gate': 'Allow/deny decision with custom thresholds — $0.01 USDC',
+      'GET /debug/:address': 'Raw chain data — free',
+      'GET /stats': 'Aggregate analytics — free',
       'GET /health': 'Free health check'
     },
     pricing: '$0.01 USDC per request via x402 (Base network)',
-    docs: 'https://github.com/your-repo/trust-gate'
+    docs: 'https://github.com/oceanrun/trust-gate'
   })
 })
 
