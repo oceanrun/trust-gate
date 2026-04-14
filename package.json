@@ -1,0 +1,27 @@
+{
+  "name": "trust-gate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx index.ts",
+    "start": "node --import tsx index.ts"
+  },
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.47.0",
+    "@x402/evm": "^2.10.0",
+    "@x402/express": "^2.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.3.2",
+    "helmet": "^8.1.0",
+    "viem": "^2.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
