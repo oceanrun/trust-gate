@@ -21,44 +21,39 @@ const client = createPublicClient({
   transport: http(process.env.ETH_RPC_URL ?? 'https://ethereum.publicnode.com'),
 })
 
-// Resolve wallet address → agentId by scanning Registered events
+// Resolve wallet address → agentId with a hard 5s timeout
+// Most addresses aren't registered — fail fast rather than scan slowly
 async function resolveAgentId(address: `0x${string}`): Promise<bigint | null> {
-  const startBlock = 19000000n // ERC-8004 deployed ~early 2026
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000))
 
-  try {
-    // Try full range first (works on Alchemy, Infura, etc.)
-    const logs = await client.getLogs({
-      address: IDENTITY_REGISTRY,
-      event: IDENTITY_ABI[0],
-      args: { wallet: address },
-      fromBlock: startBlock,
-      toBlock: 'latest',
-    })
-
-    if (logs.length > 0) {
-      return (logs[logs.length - 1].args as { agentId: bigint }).agentId
-    }
-    return null
-  } catch {
-    // Fallback: chunked scan for RPCs with block range limits
+  const scan = async (): Promise<bigint | null> => {
     const currentBlock = await client.getBlockNumber()
-    const chunkSize = 45000n
+    const startBlock = currentBlock > 2_000_000n ? currentBlock - 2_000_000n : 19_000_000n
 
-    for (let to = currentBlock; to >= startBlock; to -= chunkSize) {
-      const from = to - chunkSize + 1n < startBlock ? startBlock : to - chunkSize + 1n
-      const logs = await client.getLogs({
-        address: IDENTITY_REGISTRY,
-        event: IDENTITY_ABI[0],
-        args: { wallet: address },
-        fromBlock: from,
-        toBlock: to,
-      })
-      if (logs.length > 0) {
-        return (logs[logs.length - 1].args as { agentId: bigint }).agentId
-      }
+    // Fire two range queries in parallel
+    const mid = startBlock + (currentBlock - startBlock) / 2n
+    const [recent, older] = await Promise.allSettled([
+      client.getLogs({
+        address: IDENTITY_REGISTRY, event: IDENTITY_ABI[0],
+        args: { wallet: address }, fromBlock: mid, toBlock: currentBlock,
+      }),
+      client.getLogs({
+        address: IDENTITY_REGISTRY, event: IDENTITY_ABI[0],
+        args: { wallet: address }, fromBlock: startBlock, toBlock: mid,
+      }),
+    ])
+
+    // Check recent first (most registrations are recent)
+    if (recent.status === 'fulfilled' && recent.value.length > 0) {
+      return (recent.value[recent.value.length - 1].args as { agentId: bigint }).agentId
+    }
+    if (older.status === 'fulfilled' && older.value.length > 0) {
+      return (older.value[older.value.length - 1].args as { agentId: bigint }).agentId
     }
     return null
   }
+
+  return Promise.race([scan(), timeout])
 }
 
 export async function getReputation(address: string): Promise<ReputationData> {
