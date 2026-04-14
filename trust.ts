@@ -1,6 +1,7 @@
 import type {
   ReputationData,
   OnChainHistory,
+  SolanaHistory,
   CompositeScore,
   TrustDecision
 } from './types'
@@ -60,12 +61,50 @@ export function scoreOnChain(history: OnChainHistory): number {
   return Math.min(parseFloat(pts.toFixed(1)), 10)
 }
 
+// ── On-chain score — Solana variant (0–10) ───────────────────────
+
+export function scoreOnChainSolana(history: SolanaHistory): number {
+  let pts = 0
+
+  // Wallet age (0–2)
+  if (history.walletAgeDays > 365) pts += 2
+  else if (history.walletAgeDays > 90) pts += 1.5
+  else if (history.walletAgeDays > 30) pts += 1
+  else if (history.walletAgeDays > 7) pts += 0.5
+
+  // Activity (0–2)
+  if (history.txCount > 500) pts += 2
+  else if (history.txCount > 100) pts += 1.5
+  else if (history.txCount > 20) pts += 1
+  else if (history.txCount > 5) pts += 0.5
+  if (history.hasRecentActivity) pts += 0.25
+  pts = Math.min(pts, 2.25)
+
+  // SOL balance (0–2)
+  if (history.solBalance > 10) pts += 2
+  else if (history.solBalance > 1) pts += 1.5
+  else if (history.solBalance > 0.1) pts += 1
+  else if (history.solBalance > 0) pts += 0.5
+
+  // No x402 history on Solana yet (0–2) — give baseline
+  pts += 0
+
+  // Wallet vs program (0–2)
+  if (!history.isProgram) pts += 2
+  else pts += 0.5
+
+  // Hard disqualifiers
+  if (history.walletAgeDays === 0) pts = Math.min(pts, 1)
+
+  return Math.min(parseFloat(pts.toFixed(1)), 10)
+}
+
 // ── Composite score — weighted blend of ERC-8004 + on-chain ──────
 
 export function buildComposite(
   rep: ReputationData,
   onchain: number,
-  history: OnChainHistory
+  history: OnChainHistory | SolanaHistory
 ): CompositeScore {
   const hasERC8004 = rep.score > 0 && rep.transactionCount > 0
   const erc8004Weight = hasERC8004 ? 0.6 : 0.2
@@ -84,17 +123,25 @@ export function buildComposite(
     history.txCount > 500 ? 2 : history.txCount > 100 ? 1.5 : history.txCount > 20 ? 1 : 0.5, 2
   )
 
-  const balance = history.ethBalance > 1 ? 2
-    : history.ethBalance > 0.1 ? 1.5
-    : history.ethBalance > 0.01 ? 1
-    : history.ethBalance > 0 ? 0.5 : 0
+  const isSolana = 'chain' in history && history.chain === 'solana'
+  const bal = isSolana ? (history as SolanaHistory).solBalance : (history as OnChainHistory).ethBalance
+  const balThresholds = isSolana ? [10, 1, 0.1] : [1, 0.1, 0.01]
 
-  const disputeRatio = history.x402PaymentCount > 0
-    ? history.x402DisputeCount / history.x402PaymentCount : 0
-  const x402pts = history.x402PaymentCount > 50 && disputeRatio < 0.01 ? 2
-    : history.x402PaymentCount > 10 ? 1.5
-    : history.x402PaymentCount > 3 ? 1
-    : history.x402PaymentCount > 0 ? 0.5 : 0
+  const balance = bal > balThresholds[0] ? 2
+    : bal > balThresholds[1] ? 1.5
+    : bal > balThresholds[2] ? 1
+    : bal > 0 ? 0.5 : 0
+
+  let x402pts = 0
+  if (!isSolana) {
+    const h = history as OnChainHistory
+    const disputeRatio = h.x402PaymentCount > 0
+      ? h.x402DisputeCount / h.x402PaymentCount : 0
+    x402pts = h.x402PaymentCount > 50 && disputeRatio < 0.01 ? 2
+      : h.x402PaymentCount > 10 ? 1.5
+      : h.x402PaymentCount > 3 ? 1
+      : h.x402PaymentCount > 0 ? 0.5 : 0
+  }
 
   return {
     final,
@@ -115,11 +162,14 @@ export function buildComposite(
 export function scoreTrust(
   address: string,
   rep: ReputationData,
-  history: OnChainHistory,
+  history: OnChainHistory | SolanaHistory,
   threshold = DEFAULT_THRESHOLD,
   minStake = DEFAULT_MIN_STAKE
 ): TrustDecision {
-  const onchainScore = scoreOnChain(history)
+  const isSolana = 'chain' in history && history.chain === 'solana'
+  const onchainScore = isSolana
+    ? scoreOnChainSolana(history as SolanaHistory)
+    : scoreOnChain(history as OnChainHistory)
   const composite = buildComposite(rep, onchainScore, history)
   const reasons: string[] = []
   let trusted = true
@@ -138,8 +188,14 @@ export function scoreTrust(
     reasons.push(`ERC-8004 stake $${rep.staked} meets minimum $${minStake}`)
   }
 
-  if (history.isContract) {
-    reasons.push('Address is a smart contract — elevated scrutiny applied')
+  const isContractOrProgram = isSolana
+    ? (history as SolanaHistory).isProgram
+    : (history as OnChainHistory).isContract
+
+  if (isContractOrProgram) {
+    reasons.push(isSolana
+      ? 'Address is a program — elevated scrutiny applied'
+      : 'Address is a smart contract — elevated scrutiny applied')
   }
 
   if (history.walletAgeDays === 0) {
@@ -151,15 +207,20 @@ export function scoreTrust(
     reasons.push(`Wallet age ${history.walletAgeDays} days`)
   }
 
-  if (history.x402PaymentCount === 0) {
-    reasons.push('No x402 payment history — unknown actor')
-  } else {
-    const disputeRate = ((history.x402DisputeCount / history.x402PaymentCount) * 100).toFixed(1)
-    reasons.push(`x402: ${history.x402PaymentCount} payments, ${disputeRate}% dispute rate`)
-    if (history.x402DisputeCount > 5) {
-      trusted = false
-      reasons.push('Excessive disputes on x402 — blocked')
+  if (!isSolana) {
+    const h = history as OnChainHistory
+    if (h.x402PaymentCount === 0) {
+      reasons.push('No x402 payment history — unknown actor')
+    } else {
+      const disputeRate = ((h.x402DisputeCount / h.x402PaymentCount) * 100).toFixed(1)
+      reasons.push(`x402: ${h.x402PaymentCount} payments, ${disputeRate}% dispute rate`)
+      if (h.x402DisputeCount > 5) {
+        trusted = false
+        reasons.push('Excessive disputes on x402 — blocked')
+      }
     }
+  } else {
+    reasons.push('Solana wallet — no x402 dispute data available')
   }
 
   if (rep.verified) {
@@ -185,9 +246,9 @@ export function scoreTrust(
       walletAgeDays: history.walletAgeDays,
       txCount: history.txCount,
       hasRecentActivity: history.hasRecentActivity,
-      isContract: history.isContract,
-      x402PaymentCount: history.x402PaymentCount,
-      x402DisputeCount: history.x402DisputeCount
+      isContract: isContractOrProgram,
+      x402PaymentCount: isSolana ? 0 : (history as OnChainHistory).x402PaymentCount,
+      x402DisputeCount: isSolana ? 0 : (history as OnChainHistory).x402DisputeCount,
     },
     checked_at: new Date().toISOString(),
     sources

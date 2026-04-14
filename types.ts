@@ -55,6 +55,16 @@ export interface TrustDecision {
   sources: Array<'erc8004' | 'rpc' | 'mock'>
 }
 
+export interface SolanaHistory {
+  chain: 'solana'
+  walletAgeDays: number
+  txCount: number
+  solBalance: number
+  hasRecentActivity: boolean
+  isProgram: boolean
+  source: 'rpc' | 'mock'
+}
+
 export interface GateRequest {
   address: string
   threshold?: number   // minimum composite score, default 4.0

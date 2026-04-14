@@ -21,31 +21,44 @@ const client = createPublicClient({
   transport: http(process.env.ETH_RPC_URL ?? 'https://ethereum.publicnode.com'),
 })
 
-// Resolve wallet address → agentId by scanning Registered events in chunks
-// Public RPCs cap at ~50k blocks per getLogs call
+// Resolve wallet address → agentId by scanning Registered events
 async function resolveAgentId(address: `0x${string}`): Promise<bigint | null> {
-  const currentBlock = await client.getBlockNumber()
   const startBlock = 19000000n // ERC-8004 deployed ~early 2026
-  const chunkSize = 45000n
 
-  // Walk backwards from latest — most registrations are recent
-  for (let to = currentBlock; to >= startBlock; to -= chunkSize) {
-    const from = to - chunkSize + 1n < startBlock ? startBlock : to - chunkSize + 1n
-
+  try {
+    // Try full range first (works on Alchemy, Infura, etc.)
     const logs = await client.getLogs({
       address: IDENTITY_REGISTRY,
       event: IDENTITY_ABI[0],
       args: { wallet: address },
-      fromBlock: from,
-      toBlock: to,
+      fromBlock: startBlock,
+      toBlock: 'latest',
     })
 
     if (logs.length > 0) {
       return (logs[logs.length - 1].args as { agentId: bigint }).agentId
     }
-  }
+    return null
+  } catch {
+    // Fallback: chunked scan for RPCs with block range limits
+    const currentBlock = await client.getBlockNumber()
+    const chunkSize = 45000n
 
-  return null
+    for (let to = currentBlock; to >= startBlock; to -= chunkSize) {
+      const from = to - chunkSize + 1n < startBlock ? startBlock : to - chunkSize + 1n
+      const logs = await client.getLogs({
+        address: IDENTITY_REGISTRY,
+        event: IDENTITY_ABI[0],
+        args: { wallet: address },
+        fromBlock: from,
+        toBlock: to,
+      })
+      if (logs.length > 0) {
+        return (logs[logs.length - 1].args as { agentId: bigint }).agentId
+      }
+    }
+    return null
+  }
 }
 
 export async function getReputation(address: string): Promise<ReputationData> {

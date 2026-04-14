@@ -9,9 +9,16 @@ import { ExactEvmScheme } from '@x402/evm/exact/server'
 import { generateJwt } from '@coinbase/cdp-sdk/auth'
 import { getReputation, debugReputation } from './reputation'
 import { getOnChainHistory, debugOnChain } from './onchain'
+import { getSolanaHistory, debugSolana, isSolanaAddress } from './onchain-solana'
 import { scoreTrust } from './trust'
 import { publicLimiter, debugLimiter, paidLimiter } from './rateLimiter'
-import type { GateRequest } from './types'
+import { logCheck, getStats } from './analytics'
+import type { GateRequest, ReputationData } from './types'
+
+// Solana wallets have no ERC-8004 registration
+function mockSolanaReputation(_address: string): ReputationData {
+  return { score: 0, staked: 0, verified: false, transactionCount: 0, raw: { solana: true } }
+}
 
 const app = express()
 const PORT = process.env.PORT ?? 3000
@@ -48,8 +55,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 // ── #2 Input validation helpers ──────────────────────────────────
 
 function validateAddress(address: string): string | null {
-  if (typeof address !== 'string' || address.length > 1000) return 'Invalid Ethereum address'
-  if (!isAddress(address)) return 'Invalid Ethereum address'
+  if (typeof address !== 'string' || address.length > 1000) return 'Invalid address'
+  if (!isAddress(address) && !isSolanaAddress(address)) return 'Invalid address'
   return null
 }
 
@@ -57,7 +64,7 @@ function validateGateBody(body: unknown): { error: string } | GateRequest {
   const b = body as Record<string, unknown>
 
   if (!b.address || typeof b.address !== 'string') return { error: 'address required' }
-  if (String(b.address).length > 1000) return { error: 'Invalid Ethereum address' }
+  if (String(b.address).length > 1000) return { error: 'Invalid address' }
 
   const addrErr = validateAddress(String(b.address))
   if (addrErr) return { error: addrErr }
@@ -104,6 +111,18 @@ app.get('/', publicLimiter, (_, res) => {
   })
 })
 
+// ── Stats endpoint — cached, rate limited ────────────────────────
+
+app.get('/stats', debugLimiter, async (_, res) => {
+  try {
+    const stats = await getStats()
+    res.json(stats)
+  } catch (err) {
+    console.error('stats endpoint error:', err)
+    res.status(500).json({ error: 'Request failed' })
+  }
+})
+
 // ── Debug endpoint — hits real RPC regardless of MOCK_MODE ───────
 
 app.get('/debug/:address', debugLimiter, async (req, res) => {
@@ -112,21 +131,27 @@ app.get('/debug/:address', debugLimiter, async (req, res) => {
   if (addrErr) { res.status(400).json({ error: addrErr }); return }
 
   try {
-    const [erc8004, onchain] = await Promise.allSettled([
-      debugReputation(address),
-      debugOnChain(address)
-    ])
+    if (isSolanaAddress(address)) {
+      const solana = await debugSolana(address)
+      res.json({ address, chain: 'solana', ...solana, queried_at: new Date().toISOString() })
+    } else {
+      const [erc8004, onchain] = await Promise.allSettled([
+        debugReputation(address),
+        debugOnChain(address)
+      ])
 
-    res.json({
-      address,
-      erc8004: erc8004.status === 'fulfilled'
-        ? erc8004.value
-        : { error: 'ERC-8004 query failed' },
-      onchain: onchain.status === 'fulfilled'
-        ? onchain.value
-        : { error: 'On-chain query failed' },
-      queried_at: new Date().toISOString(),
-    })
+      res.json({
+        address,
+        chain: 'evm',
+        erc8004: erc8004.status === 'fulfilled'
+          ? erc8004.value
+          : { error: 'ERC-8004 query failed' },
+        onchain: onchain.status === 'fulfilled'
+          ? onchain.value
+          : { error: 'On-chain query failed' },
+        queried_at: new Date().toISOString(),
+      })
+    }
   } catch (err) {
     console.error('debug endpoint error:', err)
     res.status(500).json({ error: 'Request failed' })
@@ -198,6 +223,7 @@ if (process.env.MOCK_MODE !== 'true') {
 // ── Paid endpoints ────────────────────────────────────────────────
 
 app.get('/trust/:address', paidLimiter, async (req, res) => {
+  const start = Date.now()
   const { address } = req.params
   const addrErr = validateAddress(address)
   if (addrErr) { res.status(400).json({ error: addrErr }); return }
@@ -208,12 +234,26 @@ app.get('/trust/:address', paidLimiter, async (req, res) => {
     ? parseFloat(req.query.minStake as string) : undefined
 
   try {
+    const solana = isSolanaAddress(address)
     const [rep, history] = await withTimeout(
-      Promise.all([getReputation(address), getOnChainHistory(address)]),
-      10_000,
+      Promise.all([
+        solana ? mockSolanaReputation(address) : getReputation(address),
+        solana ? getSolanaHistory(address) : getOnChainHistory(address),
+      ]),
+      30_000,
     )
     const decision = scoreTrust(address, rep, history, threshold, minStake)
     res.json(decision)
+
+    logCheck({
+      address,
+      trusted: decision.trusted,
+      score: decision.score,
+      endpoint: '/trust',
+      duration_ms: Date.now() - start,
+      payment_success: process.env.MOCK_MODE !== 'true',
+      composite_breakdown: decision.composite.breakdown,
+    })
   } catch (err) {
     console.error('trust endpoint error:', err)
     if (err instanceof Error && err.message === 'TIMEOUT') {
@@ -225,15 +265,20 @@ app.get('/trust/:address', paidLimiter, async (req, res) => {
 })
 
 app.post('/gate', paidLimiter, async (req, res) => {
+  const start = Date.now()
   const validated = validateGateBody(req.body)
   if ('error' in validated) { res.status(400).json({ error: validated.error }); return }
 
   const { address, threshold, minStake } = validated
 
   try {
+    const solana = isSolanaAddress(address)
     const [rep, history] = await withTimeout(
-      Promise.all([getReputation(address), getOnChainHistory(address)]),
-      10_000,
+      Promise.all([
+        solana ? mockSolanaReputation(address) : getReputation(address),
+        solana ? getSolanaHistory(address) : getOnChainHistory(address),
+      ]),
+      30_000,
     )
     const decision = scoreTrust(address, rep, history, threshold, minStake)
 
@@ -242,6 +287,16 @@ app.post('/gate', paidLimiter, async (req, res) => {
     } else {
       res.status(403).json(decision)
     }
+
+    logCheck({
+      address,
+      trusted: decision.trusted,
+      score: decision.score,
+      endpoint: '/gate',
+      duration_ms: Date.now() - start,
+      payment_success: process.env.MOCK_MODE !== 'true',
+      composite_breakdown: decision.composite.breakdown,
+    })
   } catch (err) {
     console.error('gate endpoint error:', err)
     if (err instanceof Error && err.message === 'TIMEOUT') {
