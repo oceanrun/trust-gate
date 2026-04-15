@@ -14,6 +14,7 @@ import { scoreTrust } from './trust'
 import { publicLimiter, debugLimiter, paidLimiter } from './rateLimiter'
 import { logCheck, getStats } from './analytics'
 import { getCached, writeCache, incrementPassCount, incrementDisputeCount, getCacheHitRate, getCacheStats } from './cache'
+import { createApiKey, validateApiKey, getKeyUsage } from './apikeys'
 import type { GateRequest, ReputationData } from './types'
 
 // Solana wallets have no ERC-8004 registration
@@ -164,6 +165,26 @@ app.post('/dispute', debugLimiter, (req, res) => {
   res.json({ ok: true, address, message: 'Dispute recorded' })
 })
 
+// ── API key endpoints ────────────────────────────────────────────
+
+app.post('/keys/generate', debugLimiter, async (req, res) => {
+  const { name, owner } = req.body as { name?: string; owner?: string }
+  if (!name) { res.status(400).json({ error: 'name required' }); return }
+
+  const result = await createApiKey(name, owner ?? '')
+  if ('error' in result) { res.status(500).json(result); return }
+  res.json(result)
+})
+
+app.get('/keys/usage', debugLimiter, async (req, res) => {
+  const key = req.header('x-api-key')
+  if (!key) { res.status(401).json({ error: 'x-api-key header required' }); return }
+
+  const result = await getKeyUsage(key)
+  if ('error' in result) { res.status(401).json(result); return }
+  res.json(result)
+})
+
 // ── Debug endpoint — hits real RPC regardless of MOCK_MODE ───────
 
 app.get('/debug/:address', debugLimiter, async (req, res) => {
@@ -200,6 +221,7 @@ app.get('/debug/:address', debugLimiter, async (req, res) => {
 })
 
 // ── x402 payment middleware — all routes below require $0.01 USDC ─
+// API key authentication bypasses x402 if valid key provided
 
 if (process.env.MOCK_MODE !== 'true') {
   const CDP_API_KEY = process.env.CDP_API_KEY
@@ -241,22 +263,36 @@ if (process.env.MOCK_MODE !== 'true') {
     price: '$0.01',
   }
 
-  app.use(
-    paymentMiddlewareFromConfig(
-      {
-        'GET /trust/:address': {
-          accepts: paymentConfig,
-          description: 'ERC-8004 reputation score for an agent wallet',
-        },
-        'POST /gate': {
-          accepts: paymentConfig,
-          description: 'Trust gate decision with configurable thresholds',
-        },
+  const x402Middleware = paymentMiddlewareFromConfig(
+    {
+      'GET /trust/:address': {
+        accepts: paymentConfig,
+        description: 'ERC-8004 reputation score for an agent wallet',
       },
-      facilitator,
-      [{ network: 'eip155:8453', server: new ExactEvmScheme() }],
-    )
+      'POST /gate': {
+        accepts: paymentConfig,
+        description: 'Trust gate decision with configurable thresholds',
+      },
+    },
+    facilitator,
+    [{ network: 'eip155:8453', server: new ExactEvmScheme() }],
   )
+
+  // Wrap x402 — skip if request has a valid API key
+  app.use(async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const apiKey = req.header('x-api-key')
+    if (apiKey) {
+      const { valid, error } = await validateApiKey(apiKey)
+      if (valid) {
+        next() // skip x402, go straight to handler
+        return
+      }
+      res.status(401).json({ error: error ?? 'Invalid API key' })
+      return
+    }
+    // No API key — run x402 payment flow
+    x402Middleware(req, res, next)
+  })
 } else {
   console.log('Mock mode: skipping x402 payment middleware')
 }
