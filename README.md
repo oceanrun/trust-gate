@@ -2,6 +2,22 @@
 
 Layered trust scoring for x402 agent wallets — combines ERC-8004 reputation, on-chain wallet history, and x402 dispute rates into a single composite score.
 
+## Quick start
+
+```bash
+npm install @oceanrun/trustgate
+```
+
+```typescript
+import express from 'express'
+import { trustGate } from '@oceanrun/trustgate'
+
+const app = express()
+app.use(trustGate())
+```
+
+Every request with an `x-agent-address` header gets scored. Trusted agents pass through. Untrusted agents get 403 with reasons. Requests without a wallet header pass through ungated.
+
 ## Why
 
 There are 20M+ x402 transactions on Base with zero trust layer. Any wallet can call any x402 service. TrustGate sits between the payment and the response: before your service does work for an agent, check whether that agent is worth trusting.
