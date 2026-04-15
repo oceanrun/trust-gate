@@ -81,6 +81,7 @@ export async function getStats(cacheHitRate: number, cacheStats: unknown) {
     avg_score: parseFloat(Number(t.avg_score).toFixed(1)),
     checks_today: today.count ?? 0,
     usdc_earned: parseFloat((paid * 0.01).toFixed(2)),
+    usdc_earned_note: 'Reflects logged paid checks — see on-chain for ground truth.',
     cache_hit_rate: cacheHitRate,
     top_failing_reasons: topReasons.data ?? [],
     top_trusted: cs?.top_trusted ?? [],
