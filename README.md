@@ -136,6 +136,52 @@ npm run dev
 | `ETH_RPC_URL` | no | Ethereum RPC (defaults to publicnode) |
 | `BASE_RPC_URL` | no | Base RPC (defaults to publicnode) |
 
+## Reputation cache and trust ledger
+
+TrustGate caches every scored address in a trust ledger (Supabase). Scores are cached for 24 hours — repeat checks on the same address return in <500ms instead of 15-20s of RPC calls.
+
+The ledger tracks more than just scores:
+
+- **`pass_count`** — incremented every time `/gate` returns 200 for an address. Agents that pass frequently build a track record.
+- **`dispute_count`** — incremented via `POST /dispute` with `{"address": "0x..."}`. Addresses with >2 disputes are flagged.
+- **Cache misses** trigger a full on-chain lookup (ERC-8004 + ETH mainnet + Base x402 logs). The result is written to cache for the next caller.
+
+Over time, the ledger becomes a reputation layer on top of the raw chain data. An agent's TrustGate history — how many services let it through, how many disputed it — feeds back into the trust signal.
+
+### `GET /stats`
+
+Public aggregate data. Cached for 60 seconds.
+
+```bash
+curl https://trust-gate-production.up.railway.app/stats
+```
+
+```json
+{
+  "total_checks": 18,
+  "paid_checks": 10,
+  "trusted_rate": 0.5,
+  "unique_addresses": 1,
+  "avg_score": 4.8,
+  "checks_today": 7,
+  "usdc_earned": 0.1,
+  "cache_hit_rate": 0.5,
+  "top_trusted": [{"address": "0x...", "score": 5.4, "pass_count": 12}],
+  "flagged_addresses": [{"address": "0x...", "score": 2.1, "dispute_count": 5}],
+  "top_failing_reasons": [{"reason": "No ERC-8004 registration", "count": 9}]
+}
+```
+
+### `POST /dispute`
+
+Flag an address. Free, no payment required.
+
+```bash
+curl -X POST https://trust-gate-production.up.railway.app/dispute \
+  -H 'Content-Type: application/json' \
+  -d '{"address": "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"}'
+```
+
 ## Integration
 
 If you're building an x402 service and want to gate responses on trust, call `/gate` before serving your paid response. In your middleware, after the x402 payment clears, extract the payer's wallet address and POST it to TrustGate. If the response is 200, serve the result. If 403, refund or reject. One HTTP call, one boolean — `trusted: true` or `trusted: false`. The `reasons` array tells the caller exactly why they were blocked, and the `composite.breakdown` gives granular scores if you want to set your own thresholds instead of using the defaults (score >= 4.0, stake >= $100).
