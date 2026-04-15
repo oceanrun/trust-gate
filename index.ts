@@ -13,6 +13,7 @@ import { getSolanaHistory, debugSolana, isSolanaAddress } from './onchain-solana
 import { scoreTrust } from './trust'
 import { publicLimiter, debugLimiter, paidLimiter } from './rateLimiter'
 import { logCheck, getStats } from './analytics'
+import { getCached, writeCache, incrementPassCount, incrementDisputeCount, getCacheHitRate, getCacheStats } from './cache'
 import type { GateRequest, ReputationData } from './types'
 
 // Solana wallets have no ERC-8004 registration
@@ -142,12 +143,25 @@ td{padding:6px 0;border-bottom:1px solid #1a1a1a;color:#888;vertical-align:top}t
 
 app.get('/stats', debugLimiter, async (_, res) => {
   try {
-    const stats = await getStats()
+    const cs = await getCacheStats()
+    const stats = await getStats(getCacheHitRate(), cs)
     res.json(stats)
   } catch (err) {
     console.error('stats endpoint error:', err)
     res.status(500).json({ error: 'Request failed' })
   }
+})
+
+// ── Dispute endpoint — flag an address ───────────────────────────
+
+app.post('/dispute', debugLimiter, (req, res) => {
+  const { address } = req.body as { address?: string }
+  if (!address) { res.status(400).json({ error: 'address required' }); return }
+  const addrErr = validateAddress(address)
+  if (addrErr) { res.status(400).json({ error: addrErr }); return }
+
+  incrementDisputeCount(address)
+  res.json({ ok: true, address, message: 'Dispute recorded' })
 })
 
 // ── Debug endpoint — hits real RPC regardless of MOCK_MODE ───────
@@ -255,6 +269,14 @@ app.get('/trust/:address', paidLimiter, async (req, res) => {
   const addrErr = validateAddress(address)
   if (addrErr) { res.status(400).json({ error: addrErr }); return }
 
+  // Check cache first
+  const cached = await getCached(address)
+  if (cached) {
+    res.json(cached)
+    logCheck({ address, trusted: cached.trusted, score: cached.score, endpoint: '/trust', duration_ms: Date.now() - start, payment_success: process.env.MOCK_MODE !== 'true', composite_breakdown: (cached.composite as Record<string, unknown>).breakdown as Record<string, number> })
+    return
+  }
+
   const threshold = req.query.threshold !== undefined
     ? parseFloat(req.query.threshold as string) : undefined
   const minStake = req.query.minStake !== undefined
@@ -272,6 +294,7 @@ app.get('/trust/:address', paidLimiter, async (req, res) => {
     const decision = scoreTrust(address, rep, history, threshold, minStake)
     res.json(decision)
 
+    writeCache(decision)
     logCheck({
       address,
       trusted: decision.trusted,
@@ -298,6 +321,20 @@ app.post('/gate', paidLimiter, async (req, res) => {
 
   const { address, threshold, minStake } = validated
 
+  // Check cache first
+  const cached = await getCached(address)
+  if (cached) {
+    const trusted = cached.score >= (threshold ?? 4.0)
+    if (trusted) {
+      incrementPassCount(address)
+      res.status(200).json(cached)
+    } else {
+      res.status(403).json(cached)
+    }
+    logCheck({ address, trusted, score: cached.score, endpoint: '/gate', duration_ms: Date.now() - start, payment_success: process.env.MOCK_MODE !== 'true', composite_breakdown: (cached.composite as Record<string, unknown>).breakdown as Record<string, number> })
+    return
+  }
+
   try {
     const solana = isSolanaAddress(address)
     const [rep, history] = await withTimeout(
@@ -310,11 +347,13 @@ app.post('/gate', paidLimiter, async (req, res) => {
     const decision = scoreTrust(address, rep, history, threshold, minStake)
 
     if (decision.trusted) {
+      incrementPassCount(address)
       res.status(200).json(decision)
     } else {
       res.status(403).json(decision)
     }
 
+    writeCache(decision)
     logCheck({
       address,
       trusted: decision.trusted,

@@ -50,7 +50,7 @@ export function logCheck(event: CheckEvent): void {
 // Layer 3: cached stats query
 let statsCache: { data: unknown; expires: number } | null = null
 
-export async function getStats() {
+export async function getStats(cacheHitRate: number, cacheStats: unknown) {
   if (statsCache && Date.now() < statsCache.expires) {
     return statsCache.data
   }
@@ -71,6 +71,7 @@ export async function getStats() {
 
   const t = totals.data ?? { total_checks: 0, trusted_count: 0, unique_addresses: 0, avg_score: 0 }
   const paid = paidCount.count ?? 0
+  const cs = cacheStats as Record<string, unknown> | null
 
   const stats = {
     total_checks: t.total_checks,
@@ -80,7 +81,10 @@ export async function getStats() {
     avg_score: parseFloat(Number(t.avg_score).toFixed(1)),
     checks_today: today.count ?? 0,
     usdc_earned: parseFloat((paid * 0.01).toFixed(2)),
+    cache_hit_rate: cacheHitRate,
     top_failing_reasons: topReasons.data ?? [],
+    top_trusted: cs?.top_trusted ?? [],
+    flagged_addresses: cs?.flagged ?? [],
   }
 
   statsCache = { data: stats, expires: Date.now() + 60_000 }
